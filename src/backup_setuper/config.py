@@ -110,7 +110,7 @@ class Destination:
             return f"rclone:{self.rclone_remote}:{self.repo_path}"
         if self.kind == "hetzner-sftp":
             s = self.sftp
-            return f"sftp:{s.user}@{s.host}:{s.port}/{s.repo_path}"
+            return f"sftp://{s.user}@{s.host}:{s.port}/{s.repo_path}"
         raise ConfigError(f"unknown kind {self.kind!r}")
 
     @property

@@ -57,7 +57,7 @@ def test_revoke_key_removes_matching_line_keeps_others():
     # The put() call should contain only the Mac key.
     put_calls = [c for c in box.conn.put.call_args_list]
     assert len(put_calls) == 1
-    written = put_calls[0].args[0].getvalue()
+    written = put_calls[0].args[0].getvalue().decode("utf-8")
     assert body_mac in written
     assert body_target not in written
 

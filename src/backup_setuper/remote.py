@@ -59,13 +59,16 @@ class TargetSSH:
         self._run(f"mkdir -p {shlex.quote(path)} && chmod {mode} {shlex.quote(path)}", hide=True)
 
     def write_file(self, remote_path: str, content: str, mode: str = "644") -> None:
+        # BytesIO so paramiko's size check matches the on-wire byte count;
+        # StringIO uses char count and breaks on multi-byte UTF-8 (e.g. French accents).
+        buf = io.BytesIO(content.encode("utf-8"))
         if not self.sudo:
-            self.conn.put(io.StringIO(content), remote=remote_path)
+            self.conn.put(buf, remote=remote_path)
             self.conn.run(f"chmod {mode} {shlex.quote(remote_path)}", hide=True)
             return
         # SFTP runs as the SSH user (not root) so land in /tmp first, then sudo-install.
         tmp = f"/tmp/bs-{uuid.uuid4().hex}"
-        self.conn.put(io.StringIO(content), remote=tmp)
+        self.conn.put(buf, remote=tmp)
         # Always rm the tmp file, even on install failure.
         self._run(
             f"install -m {mode} -o root -g root {shlex.quote(tmp)} {shlex.quote(remote_path)}; "
@@ -108,6 +111,38 @@ class TargetSSH:
             warn=True, hide=True,
         )
         return r.ok
+
+    def ensure_known_host(self, host: str, port: int = 22) -> bool:
+        """Add (host, port) to /root/.ssh/known_hosts if not already trusted.
+
+        Returns True if a fresh entry was added, False if the host was already known.
+        Raises RuntimeError if ssh-keyscan returns nothing (host unreachable / wrong port).
+        """
+        known = "/root/.ssh/known_hosts"
+        self._run(
+            "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+            f"touch {known} && chmod 644 {known}",
+            hide=True,
+        )
+        bracketed = f"[{host}]:{port}"
+        check = self._run(
+            f"ssh-keygen -F {shlex.quote(bracketed)} -f {known}",
+            warn=True, hide=True,
+        )
+        if check.ok:
+            return False
+        scan = self._run(
+            f"ssh-keyscan -p {port} -H {shlex.quote(host)} 2>/dev/null",
+            warn=True, hide=True,
+        )
+        if not scan.stdout.strip():
+            raise RuntimeError(f"ssh-keyscan returned nothing for {host}:{port}")
+        self._run(
+            f"cat >> {known}",
+            in_stream=io.StringIO(scan.stdout),
+            hide=True,
+        )
+        return True
 
     def restic_init(self, repo_url: str, password: str) -> None:
         self._run(
@@ -187,6 +222,6 @@ class HetznerBox:
         if not kept:
             return "refused"
         new_content = "\n".join(kept) + "\n"
-        self.conn.put(io.StringIO(new_content), remote=".ssh/authorized_keys")
+        self.conn.put(io.BytesIO(new_content.encode("utf-8")), remote=".ssh/authorized_keys")
         self.conn.run("chmod 600 ~/.ssh/authorized_keys", hide=True)
         return "revoked"

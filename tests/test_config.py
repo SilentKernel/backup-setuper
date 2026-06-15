@@ -18,7 +18,7 @@ def test_load_example_machine(example_machine_path, example_secrets):
     by_name = {d.name: d for d in m.destinations}
     assert by_name["silentds"].repository_url == "rclone:silentds-webdav:silentbox"
     assert by_name["ftp"].repository_url == "rclone:online-ftp:silentbox"
-    assert by_name["hetzner-hel"].repository_url == "sftp:u123456@u123456.your-storagebox.de:23//home/silentbox"
+    assert by_name["hetzner-hel"].repository_url == "sftp://u123456@u123456.your-storagebox.de:23//home/silentbox"
     # hetzner subset
     assert {d.name for d in m.hetzner_destinations} == {"hetzner-hel", "hetzner-fsn"}
 

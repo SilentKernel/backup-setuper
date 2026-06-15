@@ -39,7 +39,7 @@ def test_backup_script_hetzner_uses_sftp_url(example_machine_path, example_secre
     m = _machine(example_machine_path, example_secrets)
     hel = next(d for d in m.destinations if d.name == "hetzner-hel")
     out = render_backup_script(m, hel)
-    assert "export RESTIC_REPOSITORY='sftp:u123456@u123456.your-storagebox.de:23//home/silentbox'" in out
+    assert "export RESTIC_REPOSITORY='sftp://u123456@u123456.your-storagebox.de:23//home/silentbox'" in out
 
 
 def test_prune_script(example_machine_path, example_secrets):

@@ -15,7 +15,6 @@ from backup_setuper.render import (
 
 SCRIPTS_DIR = "/root/backup-scripts"
 LOGS_DIR = "/root/backup-logs"
-FIREWALL_DIR = "/root/firewall-scripts"
 RCLONE_CONF = "/root/.config/rclone/rclone.conf"
 
 
@@ -87,12 +86,16 @@ def bootstrap(machine: Machine, dry_run: bool = False, sudo_password: str | None
                     status = box.install_key(pubkey)
                     _ok(f"{d.name}: {status}")
 
+            _step("Trusting Hetzner host keys on target")
+            for d in machine.hetzner_destinations:
+                added = target.ensure_known_host(d.sftp.host, d.sftp.port)
+                _ok(f"{d.name}: {'added to known_hosts' if added else 'already trusted'}")
+
         _step("Creating directories on target")
         target.ensure_dir(SCRIPTS_DIR)
         target.ensure_dir(LOGS_DIR)
-        target.ensure_dir(FIREWALL_DIR)
         target.ensure_dir("/root/.config/rclone", mode="700")
-        _ok(f"{SCRIPTS_DIR}, {LOGS_DIR}, {FIREWALL_DIR}")
+        _ok(f"{SCRIPTS_DIR}, {LOGS_DIR}")
 
         _step("Uploading generated scripts")
         for name, content in {**bundle.backup_scripts, **bundle.prune_scripts}.items():
@@ -164,6 +167,8 @@ def hetzner_revoke(machine: Machine, pubkey: str | None = None, sudo_password: s
 def init_repos(machine: Machine, sudo_password: str | None = None) -> None:
     sudo_password = _resolve_sudo_password(machine, sudo_password)
     with _open_target(machine, sudo_password) as target:
+        for d in machine.hetzner_destinations:
+            target.ensure_known_host(d.sftp.host, d.sftp.port)
         for d in machine.destinations:
             if target.restic_repo_exists(d.repository_url, machine.restic.password):
                 click.echo(f"{d.name}: already initialized")
