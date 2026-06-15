@@ -1,0 +1,68 @@
+# Example machine using Uptime Kuma push monitors instead of Healthchecks.io.
+# Copy to machines/kumabox.yaml, adjust, and run:
+#   backup-setuper bootstrap machines/kumabox.yaml
+#
+# Each `monitor.url_ref` resolves (via secrets.yaml) to a full Kuma push URL,
+# e.g. https://kuma.example.com/api/push/<token>. The generated scripts will
+# emit `?status=up` on success and `?status=down` on failure. Kuma has no
+# /start endpoint, so the start ping is skipped for these destinations.
+#
+# You can freely mix Kuma and Healthchecks destinations within the same machine:
+# just keep using `healthcheck_ref:` for the Healthchecks ones and `monitor:`
+# for the Kuma ones.
+
+machine: kumabox
+
+target:
+  host: kumabox.example.com
+  user: root
+
+restic:
+  password_ref: kumabox-restic-pass
+  retention: '--keep-daily 30'
+
+sources:
+  - /home/ludo
+  - /root/backup-scripts
+
+excludes:
+  - '/home/ludo/.cache'
+
+destinations:
+  - name: silentds
+    kind: rclone-webdav
+    monitor:
+      kind: kuma
+      url_ref: kumabox-silentds-kuma
+    rclone_remote: silentds-webdav
+    repo_path: kumabox
+    schedule: { hour: 4, prune_minute: 0 }
+    webdav:
+      url:  'http://silentds:5005'
+      user: 'kumabox'
+      password_ref: silentds-webdav-pass
+
+  - name: ftp
+    kind: rclone-ftp
+    monitor:
+      kind: kuma
+      url_ref: kumabox-online-ftp-kuma
+    rclone_remote: online-ftp
+    repo_path: kumabox
+    schedule: { hour: 3, prune_minute: 15 }
+    ftp:
+      host: 'dedibackup-dc3.online.net'
+      user: 'sd-XXXXXX'
+      password_ref: kumabox-online-ftp-pass
+
+  - name: hetzner-hel
+    kind: hetzner-sftp
+    monitor:
+      kind: kuma
+      url_ref: kumabox-hetzner-kuma
+    schedule: { hour: 2, prune_minute: 30 }
+    sftp:
+      user: u123456
+      host: u123456.your-storagebox.de
+      port: 23
+      repo_path: '/home/kumabox'

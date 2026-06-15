@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backup-setuper"
+version = "0.1.0"
+description = "Bootstrap restic backups on a new server from a Mac, in one command."
+requires-python = ">=3.11"
+dependencies = [
+    "fabric>=3.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+backup-setuper = "backup_setuper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+backup_setuper = ["templates/*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Sauvegarde restic vers {{ destination.label }}
+HC_START_URL='{{ destination.monitor.start_url }}'
+HC_OK_URL='{{ destination.monitor.success_url }}'
+HC_FAIL_URL='{{ destination.monitor.fail_url }}'
+
+export RESTIC_PASSWORD='{{ restic_password }}'
+export RESTIC_REPOSITORY='{{ destination.repository_url }}'
+
+{% if destination.monitor.has_start -%}
+# Signaler le démarrage
+curl -fsS -m 10 --retry 5 "${HC_START_URL}" > /dev/null
+
+{% endif -%}
+restic backup \
+{%- for ex in excludes %}
+  --exclude='{{ ex }}' \
+{%- endfor %}
+  --tag {{ machine_name }} \
+  {{ sources | join(' ') }}
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    curl -fsS -m 10 --retry 5 "${HC_OK_URL}" > /dev/null
+else
+    curl -fsS -m 10 --retry 5 "${HC_FAIL_URL}" > /dev/null
+fi
+
+exit $EXIT_CODE

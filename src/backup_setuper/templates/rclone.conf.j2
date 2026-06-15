@@ -1,0 +1,7 @@
+{% for r in remotes -%}
+[{{ r.name }}]
+type = {{ r.type }}
+{% for k, v in r.fields.items() -%}
+{{ k }} = {{ v }}
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,82 @@
+# Example machine using Healthchecks.io monitors.
+# Copy this file to machines/silentbox.yaml, adjust as needed, and run:
+#   backup-setuper bootstrap machines/silentbox.yaml
+
+machine: silentbox
+
+target:
+  host: silentbox.example.com
+  user: root
+  # ssh_key: ~/.ssh/id_ed25519        # optional; default uses ssh-agent / ~/.ssh/config
+  # port: 22                          # SSH port on the target
+  # sudo: false                       # set to true when SSH user != root; bootstrap will use sudo for every privileged step
+  #                                     password sourced from --sudo-password, $BACKUP_SETUPER_SUDO_PASSWORD, or interactive prompt
+
+restic:
+  password_ref: silentbox-restic-pass
+  retention: '--keep-daily 30'
+
+sources:
+  - /home/ludo
+  - /root/backup-scripts
+  - /root/firewall-scripts
+
+excludes:
+  - '/home/ludo/.*'
+  - '/home/ludo/internal-api.example.com/data'
+
+destinations:
+  - name: silentds
+    kind: rclone-webdav
+    healthcheck_ref: silentds-hc
+    rclone_remote: silentds-webdav
+    repo_path: silentbox
+    schedule: { hour: 4, prune_minute: 0 }
+    webdav:
+      url:  'http://silentds:5005'
+      user: 'silentbox'
+      password_ref: silentds-webdav-pass
+
+  - name: ftp
+    kind: rclone-ftp
+    healthcheck_ref: online-ftp-hc
+    rclone_remote: online-ftp
+    repo_path: silentbox
+    schedule: { hour: 3, prune_minute: 15 }
+    ftp:
+      host: 'dedibackup-dc3.online.net'
+      user: 'sd-XXXXXX'
+      password_ref: online-ftp-pass
+
+  - name: hetzner-hel
+    kind: hetzner-sftp
+    healthcheck_ref: hetzner-hel-hc
+    schedule: { hour: 2, prune_minute: 30 }
+    sftp:
+      user: u123456
+      host: u123456.your-storagebox.de
+      port: 23
+      repo_path: '/home/silentbox'
+
+  - name: hetzner-fsn
+    kind: hetzner-sftp
+    healthcheck_ref: hetzner-fsn-hc
+    schedule: { hour: 6, prune_minute: 45 }
+    sftp:
+      user: u234567
+      host: u234567.your-storagebox.de
+      port: 23
+      repo_path: '/home/silentbox'
+
+# Monitor configuration — two forms are supported:
+#
+# 1. Legacy / default: Healthchecks.io. The referenced secret holds a UUID.
+#       healthcheck_ref: silentds-hc
+#
+# 2. Explicit block, supports kind = 'healthchecks' or 'kuma'. For 'kuma' the
+#    referenced secret holds the full push URL (e.g. https://kuma.example.com/api/push/xyz).
+#    Kuma has no /start endpoint; only success/fail pings are emitted.
+#
+#       monitor:
+#         kind: kuma
+#         url_ref: silentds-kuma-push

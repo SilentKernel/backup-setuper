@@ -1,0 +1,12 @@
+# ============================================================================
+# {{ machine_name }} — cron des sauvegardes restic (généré par backup-setuper)
+# ============================================================================
+
+# --- Sauvegardes quotidiennes ---
+{% for d in destinations -%}
+0 {{ '%-2d' % d.schedule.hour }} * * * /root/backup-scripts/backup-restic-{{ d.name }}.sh >> /root/backup-logs/backup-restic-{{ d.name }}.log 2>&1
+{% endfor %}
+# --- Forget + prune hebdomadaire (dimanche 22:00) ---
+{% for d in destinations -%}
+{{ '%-2d' % d.schedule.prune_minute }} 22 * * 0 /root/backup-scripts/prune-restic-{{ d.name }}.sh >> /root/backup-logs/prune-restic-{{ d.name }}.log 2>&1
+{% endfor %}
