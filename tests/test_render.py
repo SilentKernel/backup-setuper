@@ -80,7 +80,37 @@ def test_rclone_conf(example_machine_path, example_secrets):
     assert "[online-ftp]" in conf
     assert "type = ftp" in conf
     assert "host = dedibackup-dc3.online.net" in conf
+    assert "port = 21" in conf
     assert "pass = TEST-FTP-PASS" in conf
+
+
+def test_rclone_conf_ftp_custom_port(tmp_path: Path, example_secrets):
+    machine_yaml = """
+machine: ftp-custom-port
+target:
+  host: example.com
+restic:
+  password_ref: silentbox-restic-pass
+sources: [/etc]
+destinations:
+  - name: ftp-alt
+    kind: rclone-ftp
+    healthcheck_ref: silentds-hc
+    rclone_remote: ftp-alt
+    repo_path: repo
+    schedule: { hour: 5, prune_minute: 10 }
+    ftp:
+      host: ftp.example.com
+      user: bob
+      port: 2121
+      password_ref: online-ftp-pass
+"""
+    p = tmp_path / "machine.yaml"
+    p.write_text(machine_yaml)
+    m = load_machine(p, load_secrets(example_secrets))
+    conf = render_rclone_conf(build_rclone_remotes(m))
+    assert "[ftp-alt]" in conf
+    assert "port = 2121" in conf
 
 
 def test_backup_script_kuma_skips_start_ping(kuma_machine_path, kuma_secrets):

@@ -69,7 +69,7 @@ def build_rclone_remotes(machine: Machine) -> list[RcloneRemote]:
             f = d.ftp
             out.append(RcloneRemote(
                 name=d.rclone_remote, type="ftp",
-                fields={"host": f.host, "user": f.user, "pass": f.password},
+                fields={"host": f.host, "user": f.user, "port": str(f.port), "pass": f.password},
             ))
     return out
 
