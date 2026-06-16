@@ -120,6 +120,25 @@ def test_write_file_sudo_uses_tmp_then_install():
     assert any("rm -f" in c and "/tmp/bs-" in c for c in sudo_cmds)
 
 
+def test_sudo_wraps_chained_commands_in_bash_c():
+    """Regression: chained `&&` commands must ride ONE sudo invocation.
+
+    Without the wrap, `sudo -S -p '…' mkdir … && chmod …` runs `chmod` as
+    the SSH user (not root), breaking `ensure_dir`/`ensure_known_host` when
+    `sudo: true` is set on a non-root SSH user.
+    """
+    t = _make_target(sudo=True, sudo_password="secret")
+    t.ensure_dir("/root/x", mode="700")
+    sudo_cmds = [c.args[0] for c in t.conn.sudo.call_args_list]
+    assert len(sudo_cmds) == 1
+    cmd = sudo_cmds[0]
+    # Wrapped in bash -c so the remote shell parses && INSIDE sudo's command.
+    assert cmd.startswith("bash -c ")
+    # The full chain (both halves) is inside the single sudo'd payload.
+    assert "mkdir -p /root/x" in cmd
+    assert "chmod 700 /root/x" in cmd
+
+
 def test_write_file_no_sudo_direct_put():
     t = _make_target(sudo=False)
     t.write_file("/root/foo", "x")

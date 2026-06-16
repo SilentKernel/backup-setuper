@@ -21,8 +21,8 @@ def _result(stdout: str = "", ok: bool = True) -> SimpleNamespace:
 
 def test_ensure_known_host_skips_keyscan_when_already_trusted():
     t = _make_target()
-    # mkdir/touch returns OK; ssh-keygen -F finds the entry (ok=True).
-    t.conn.run.side_effect = [_result(""), _result("[h]:23 ssh-ed25519 KEYBASE", ok=True)]
+    # ssh-keygen -F finds the entry on the first call — no mkdir/keyscan needed.
+    t.conn.run.side_effect = [_result("[h]:23 ssh-ed25519 KEYBASE", ok=True)]
 
     added = t.ensure_known_host("h", 23)
 
@@ -30,14 +30,16 @@ def test_ensure_known_host_skips_keyscan_when_already_trusted():
     calls = [c.args[0] for c in t.conn.run.call_args_list]
     assert any("ssh-keygen -F" in c for c in calls)
     assert not any("ssh-keyscan" in c for c in calls)
+    # Fast path: never touches /root/.ssh.
+    assert not any("mkdir" in c for c in calls)
 
 
 def test_ensure_known_host_appends_when_unknown():
     t = _make_target()
     scan_output = "|1|HASH|HASH ssh-ed25519 AAAAFAKE\n|1|HASH|HASH ssh-rsa AAAAFAKE\n"
     t.conn.run.side_effect = [
-        _result(""),                              # mkdir/touch
         _result("", ok=False),                    # ssh-keygen -F → not found
+        _result(""),                              # mkdir/touch
         _result(scan_output, ok=True),            # ssh-keyscan
         _result("", ok=True),                     # cat >> known_hosts
     ]
@@ -57,8 +59,8 @@ def test_ensure_known_host_appends_when_unknown():
 def test_ensure_known_host_raises_when_keyscan_empty():
     t = _make_target()
     t.conn.run.side_effect = [
-        _result(""),                  # mkdir/touch
         _result("", ok=False),        # ssh-keygen -F → not found
+        _result(""),                  # mkdir/touch
         _result("", ok=True),         # ssh-keyscan → empty stdout
     ]
 

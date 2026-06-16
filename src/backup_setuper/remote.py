@@ -45,7 +45,11 @@ class TargetSSH:
     def _run(self, cmd: str, **kw):
         """Route through sudo when configured. All callers use this; never .conn.run directly."""
         if self.sudo:
-            return self.conn.sudo(cmd, **kw)
+            # Fabric's sudo prefixes `sudo -S -p '…' ` to the literal command string,
+            # so the remote shell parses `&&`/`;`/redirects AFTER sudo, running only
+            # the first word as root. Wrap in `bash -c` so the whole chain rides one
+            # sudo invocation.
+            return self.conn.sudo(f"bash -c {shlex.quote(cmd)}", **kw)
         return self.conn.run(cmd, **kw)
 
     # Public alias so callers outside this class don't need to know about the sudo branching.
@@ -53,7 +57,9 @@ class TargetSSH:
         return self._run(cmd, **kw)
 
     def has(self, binary: str) -> bool:
-        return self._run(f"command -v {shlex.quote(binary)}", warn=True, hide=True).ok
+        # Run as the SSH user, not via sudo: presence checks don't need root,
+        # and sudo's restricted PATH / TTY requirements caused false negatives.
+        return self.conn.run(f"command -v {shlex.quote(binary)}", warn=True, hide=True).ok
 
     def ensure_dir(self, path: str, mode: str = "755") -> None:
         self._run(f"mkdir -p {shlex.quote(path)} && chmod {mode} {shlex.quote(path)}", hide=True)
@@ -100,8 +106,16 @@ class TargetSSH:
         return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
     def rclone_obscure(self, cleartext: str) -> str:
-        """Run `rclone obscure` on the target to encode a cleartext password."""
-        r = self._run("rclone obscure -", in_stream=io.StringIO(cleartext + "\n"), hide=True)
+        """Run `rclone obscure` on the target to encode a cleartext password.
+
+        Bypasses sudo even when self.sudo is True: `rclone obscure` is a pure
+        string transform that needs no privileges, and Fabric's sudo password
+        responder fights with our in_stream (both want stdin) — sending the
+        cleartext as the sudo password reply and failing with AuthFailure.
+        """
+        r = self.conn.run(
+            "rclone obscure -", in_stream=io.StringIO(cleartext + "\n"), hide=True,
+        )
         return r.stdout.strip()
 
     def restic_repo_exists(self, repo_url: str, password: str) -> bool:
@@ -119,29 +133,44 @@ class TargetSSH:
         Raises RuntimeError if ssh-keyscan returns nothing (host unreachable / wrong port).
         """
         known = "/root/.ssh/known_hosts"
-        self._run(
-            "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
-            f"touch {known} && chmod 644 {known}",
-            hide=True,
-        )
         bracketed = f"[{host}]:{port}"
+        # Fast path: if the host is already trusted, do nothing (no mkdir/chmod).
+        # ssh-keygen -F returns non-zero if the file is missing OR the host isn't there,
+        # so a failure here just means we need to do the full setup below.
         check = self._run(
             f"ssh-keygen -F {shlex.quote(bracketed)} -f {known}",
             warn=True, hide=True,
         )
         if check.ok:
             return False
+        # Not trusted yet — ensure the dir/file exist before appending.
+        self._run(
+            "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+            f"touch {known} && chmod 644 {known}",
+            hide=True,
+        )
         scan = self._run(
             f"ssh-keyscan -p {port} -H {shlex.quote(host)} 2>/dev/null",
             warn=True, hide=True,
         )
         if not scan.stdout.strip():
             raise RuntimeError(f"ssh-keyscan returned nothing for {host}:{port}")
-        self._run(
-            f"cat >> {known}",
-            in_stream=io.StringIO(scan.stdout),
-            hide=True,
-        )
+        # in_stream + sudo collide (Fabric's password watcher fights for stdin).
+        # Under sudo, stage the scan output via SFTP and append from a tmp file.
+        if not self.sudo:
+            self._run(
+                f"cat >> {known}",
+                in_stream=io.StringIO(scan.stdout),
+                hide=True,
+            )
+        else:
+            tmp = f"/tmp/bs-{uuid.uuid4().hex}"
+            self.conn.put(io.BytesIO(scan.stdout.encode("utf-8")), remote=tmp)
+            self._run(
+                f"cat {shlex.quote(tmp)} >> {shlex.quote(known)}; "
+                f"rc=$?; rm -f {shlex.quote(tmp)}; exit $rc",
+                hide=True,
+            )
         return True
 
     def restic_init(self, repo_url: str, password: str) -> None:
