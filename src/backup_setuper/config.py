@@ -174,7 +174,7 @@ def load_machine(path: Path, secrets: dict[str, str]) -> Machine:
         target_raw = raw["target"]
         restic_raw = raw["restic"]
         sources = list(raw["sources"])
-        excludes = list(raw.get("excludes", []))
+        excludes = list(raw.get("excludes") or [])
         dests_raw = list(raw["destinations"])
     except KeyError as e:
         raise ConfigError(f"{path}: missing required key {e}") from None
@@ -287,6 +287,10 @@ def _parse_monitor(d: dict[str, Any], secrets: dict[str, str]) -> Monitor:
     except KeyError:
         raise ConfigError(f"destination {name!r}: monitor.url_ref is required") from None
     base = _resolve(secrets, ref, f"destinations[{name}].monitor.url_ref")
+    if kind == "kuma":
+        # Kuma's UI hands you the push URL with an example query string attached
+        # (?status=up&msg=OK&ping=). Strip it: success_url/fail_url append their own.
+        base = base.split("?", 1)[0]
     _validate_strings(base, f"destinations[{name}].monitor", quote_safe=True)
     return Monitor(kind=kind, base=base)
 
