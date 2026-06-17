@@ -180,6 +180,29 @@ class TargetSSH:
             hide=False,
         )
 
+    def restic_check(
+        self,
+        repo_url: str,
+        password: str,
+        read_data: bool = False,
+        read_data_subset: str | None = None,
+    ) -> bool:
+        """Run `restic check` on the target. Returns True if the repo is healthy.
+
+        Structural check by default; `read_data` reads every pack file (slow),
+        `read_data_subset` (e.g. '10%', '1/4', '500M') verifies a subset.
+        warn=True so a non-zero exit is reported per-destination, not raised.
+        """
+        cmd = (
+            f"RESTIC_PASSWORD={shlex.quote(password)} "
+            f"restic -r {shlex.quote(repo_url)} check"
+        )
+        if read_data_subset:
+            cmd += f" --read-data-subset {shlex.quote(read_data_subset)}"
+        elif read_data:
+            cmd += " --read-data"
+        return self._run(cmd, warn=True, hide=False).ok
+
 
 # ---------- Hetzner Storage Box ----------
 

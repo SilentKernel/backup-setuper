@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
+import click
 import pytest
 
 from backup_setuper import bootstrap as bs
@@ -88,3 +89,120 @@ def test_init_repos_pretrusts_hetzner_hosts(
     scanned = {c.args for c in fake_target.ensure_known_host.call_args_list}
     expected = {(d.sftp.host, d.sftp.port) for d in machine.hetzner_destinations}
     assert scanned == expected
+
+
+# ---------- check ----------
+
+def _in_sync_script(password: str) -> str:
+    return f"#!/usr/bin/env bash\nexport RESTIC_PASSWORD='{password}'\nexport RESTIC_REPOSITORY='x'\n"
+
+
+@pytest.fixture
+def check_target(fake_target):
+    """fake_target tuned for `check`: healthy repos + in-sync deployed scripts."""
+    fake_target.restic_check.return_value = True
+    fake_target.read_file.return_value = _in_sync_script("TEST-RESTIC-PASS")
+    fake_target.ensure_known_host.return_value = False
+    return fake_target
+
+
+def test_check_runs_once_per_destination(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    _patch_target(monkeypatch, check_target)
+
+    bs.check(machine, sudo_password=None)
+
+    assert check_target.restic_check.call_count == len(machine.destinations)
+
+
+def test_check_single_destination(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    _patch_target(monkeypatch, check_target)
+
+    bs.check(machine, dest_name="ftp", sudo_password=None)
+
+    assert check_target.restic_check.call_count == 1
+    repo_url = check_target.restic_check.call_args.args[0]
+    assert repo_url == "rclone:online-ftp:silentbox"
+
+
+def test_check_unknown_destination_raises(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    _patch_target(monkeypatch, check_target)
+
+    with pytest.raises(click.ClickException) as e:
+        bs.check(machine, dest_name="nope", sudo_password=None)
+    assert "unknown destination" in str(e.value)
+
+
+def test_check_pretrusts_hetzner_before_check(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    _patch_target(monkeypatch, check_target)
+
+    bs.check(machine, sudo_password=None)
+
+    order = [c[0] for c in check_target.mock_calls if c[0] in ("ensure_known_host", "restic_check")]
+    last_scan = max(i for i, m in enumerate(order) if m == "ensure_known_host")
+    first_check = min(i for i, m in enumerate(order) if m == "restic_check")
+    assert last_scan < first_check
+
+
+def test_check_failing_repo_raises(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    check_target.restic_check.return_value = False
+    _patch_target(monkeypatch, check_target)
+
+    with pytest.raises(click.ClickException):
+        bs.check(machine, dest_name="ftp", sudo_password=None)
+
+
+def test_check_forwards_read_data_flags(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    _patch_target(monkeypatch, check_target)
+
+    bs.check(machine, dest_name="ftp", read_data=True, read_data_subset="10%", sudo_password=None)
+
+    kwargs = check_target.restic_check.call_args.kwargs
+    assert kwargs["read_data"] is True
+    assert kwargs["read_data_subset"] == "10%"
+
+
+def test_check_password_drift_raises(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    # restic check passes, but the deployed script has a stale password.
+    check_target.read_file.return_value = _in_sync_script("STALE-PASS")
+    _patch_target(monkeypatch, check_target)
+
+    with pytest.raises(click.ClickException):
+        bs.check(machine, dest_name="ftp", sudo_password=None)
+
+
+def test_check_missing_script_raises(
+    monkeypatch, check_target, example_machine_path, example_secrets
+):
+    machine = load_machine(example_machine_path, load_secrets(example_secrets))
+    check_target.read_file.return_value = None  # script not deployed
+    _patch_target(monkeypatch, check_target)
+
+    with pytest.raises(click.ClickException):
+        bs.check(machine, dest_name="ftp", sudo_password=None)
+
+
+def test_script_password_extraction():
+    assert bs._script_password(_in_sync_script("SECRET")) == "SECRET"
+    assert bs._script_password("no password line here\n") is None
+    assert bs._script_password("export RESTIC_PASSWORD=noquotes\n") is None

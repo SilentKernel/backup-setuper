@@ -139,6 +139,45 @@ def test_sudo_wraps_chained_commands_in_bash_c():
     assert "chmod 700 /root/x" in cmd
 
 
+def _last_check_cmd(t: TargetSSH, sudo: bool) -> str:
+    method = t.conn.sudo if sudo else t.conn.run
+    cmds = [c.args[0] for c in method.call_args_list if c.args and "restic" in c.args[0] and "check" in c.args[0]]
+    return cmds[-1]
+
+
+def test_restic_check_structural_no_read_data():
+    t = _make_target(sudo=False)
+    assert t.restic_check("rclone:r:p", "PASS") is True
+    cmd = _last_check_cmd(t, sudo=False)
+    assert "restic -r rclone:r:p check" in cmd
+    assert "--read-data" not in cmd
+
+
+def test_restic_check_read_data_flag():
+    t = _make_target(sudo=False)
+    t.restic_check("rclone:r:p", "PASS", read_data=True)
+    cmd = _last_check_cmd(t, sudo=False)
+    assert cmd.endswith("check --read-data")
+
+
+def test_restic_check_read_data_subset_overrides_read_data():
+    t = _make_target(sudo=False)
+    t.restic_check("rclone:r:p", "PASS", read_data=True, read_data_subset="10%")
+    cmd = _last_check_cmd(t, sudo=False)
+    # subset wins; the bare --read-data flag is not also appended
+    assert cmd.endswith("check --read-data-subset 10%")
+    assert "check --read-data-subset" in cmd
+
+
+def test_restic_check_routes_through_sudo():
+    t = _make_target(sudo=True, sudo_password="secret")
+    t.restic_check("rclone:r:p", "PASS")
+    assert t.conn.sudo.called
+    cmd = _last_check_cmd(t, sudo=True)
+    assert cmd.startswith("bash -c ")
+    assert "restic -r" in cmd and "check" in cmd
+
+
 def test_write_file_no_sudo_direct_put():
     t = _make_target(sudo=False)
     t.write_file("/root/foo", "x")

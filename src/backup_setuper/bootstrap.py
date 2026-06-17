@@ -164,6 +164,71 @@ def hetzner_revoke(machine: Machine, pubkey: str | None = None, sudo_password: s
             click.echo(f"{d.name}: {box.revoke_key(pubkey)}")
 
 
+def _script_password(content: str) -> str | None:
+    """Extract the value of `export RESTIC_PASSWORD='...'` from a deployed backup script."""
+    for line in content.splitlines():
+        if line.startswith("export RESTIC_PASSWORD="):
+            return line.split("'", 2)[1] if line.count("'") >= 2 else None
+    return None
+
+
+def check(
+    machine: Machine,
+    dest_name: str | None = None,
+    read_data: bool = False,
+    read_data_subset: str | None = None,
+    sudo_password: str | None = None,
+) -> None:
+    """Run `restic check` on the target for each destination (or one).
+
+    Also verifies the restic password baked into the deployed backup script
+    matches the local config — catching config drift where the secret changed
+    locally without re-running bootstrap.
+    """
+    if dest_name is not None:
+        selected = [d for d in machine.destinations if d.name == dest_name]
+        if not selected:
+            valid = ", ".join(d.name for d in machine.destinations)
+            raise click.ClickException(
+                f"unknown destination {dest_name!r}; valid names: {valid}"
+            )
+    else:
+        selected = machine.destinations
+
+    failures = 0
+    sudo_password = _resolve_sudo_password(machine, sudo_password)
+    with _open_target(machine, sudo_password) as target:
+        for d in selected:
+            if d.kind == "hetzner-sftp":
+                target.ensure_known_host(d.sftp.host, d.sftp.port)
+
+        for d in selected:
+            _step(f"Checking {d.label}")
+
+            # Password sync: compare the deployed script's RESTIC_PASSWORD to local config.
+            script = target.read_file(f"{SCRIPTS_DIR}/backup-restic-{d.name}.sh")
+            if script is None:
+                _warn("backup script not deployed on target (run bootstrap)")
+                failures += 1
+            elif _script_password(script) != machine.restic.password:
+                _warn("restic password OUT OF SYNC with local config (re-run bootstrap)")
+                failures += 1
+            else:
+                _ok("restic password in sync")
+
+            if target.restic_check(
+                d.repository_url, machine.restic.password,
+                read_data=read_data, read_data_subset=read_data_subset,
+            ):
+                _ok("repository check passed")
+            else:
+                _warn("repository check FAILED")
+                failures += 1
+
+    if failures:
+        raise click.ClickException(f"{failures} check(s) failed")
+
+
 def init_repos(machine: Machine, sudo_password: str | None = None) -> None:
     sudo_password = _resolve_sudo_password(machine, sudo_password)
     with _open_target(machine, sudo_password) as target:

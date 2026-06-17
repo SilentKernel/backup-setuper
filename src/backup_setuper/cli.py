@@ -72,6 +72,26 @@ def init_repos(machine_path: Path, secrets_path: Path, sudo_password: str | None
     bs.init_repos(_load(machine_path, secrets_path), sudo_password=sudo_password)
 
 
+@main.command()
+@click.argument("machine_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@secrets_opt
+@sudo_password_opt
+@click.option("--destination", "-d", "dest_name", default=None,
+              help="Only check this destination (default: all).")
+@click.option("--read-data", "read_data", is_flag=True,
+              help="Read & verify every pack file (slow, downloads the whole repo).")
+@click.option("--read-data-subset", "read_data_subset", default=None,
+              help="Verify only a subset of pack files, e.g. 10%, 1/4, 500M.")
+def check(machine_path: Path, secrets_path: Path, sudo_password: str | None,
+          dest_name: str | None, read_data: bool, read_data_subset: str | None) -> None:
+    """Run `restic check` on the target and verify the restic password is in sync."""
+    if read_data and read_data_subset:
+        raise click.ClickException("use either --read-data or --read-data-subset, not both")
+    bs.check(_load(machine_path, secrets_path), dest_name=dest_name,
+             read_data=read_data, read_data_subset=read_data_subset,
+             sudo_password=sudo_password)
+
+
 @main.command("hetzner-keys")
 @click.argument("machine_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @secrets_opt
