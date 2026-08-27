@@ -42,6 +42,11 @@ destinations:
     healthcheck_ref: online-ftp-hc
     rclone_remote: online-ftp
     repo_path: silentbox
+    # Quota Online.net dedibackup : 1000 fichiers max. 128 MiB est le plafond dur de
+    # restic (MaxPackSize) ; la rétention courte garde de la marge quand les données
+    # grossissent. Les autres destinations n'ont pas de limite de fichiers.
+    pack_size_mib: 128
+    retention: '--keep-daily 7 --keep-weekly 4 --keep-monthly 3'
     schedule: { hour: 3, prune_minute: 15 }
     ftp:
       host: 'dedibackup-dc3.online.net'

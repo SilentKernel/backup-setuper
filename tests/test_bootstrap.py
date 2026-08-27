@@ -206,3 +206,187 @@ def test_script_password_extraction():
     assert bs._script_password(_in_sync_script("SECRET")) == "SECRET"
     assert bs._script_password("no password line here\n") is None
     assert bs._script_password("export RESTIC_PASSWORD=noquotes\n") is None
+
+
+# ---------- wipe ----------
+
+@pytest.fixture
+def wipe_target(fake_target):
+    fake_target.rclone_probe_repo.return_value = ("repo", "")
+    return fake_target
+
+
+def _real_machine(example_machine_path, example_secrets):
+    return load_machine(example_machine_path, load_secrets(example_secrets))
+
+
+def test_wipe_purges_then_reinits(monkeypatch, wipe_target, example_machine_path, example_secrets):
+    m = _real_machine(example_machine_path, example_secrets)
+    _patch_target(monkeypatch, wipe_target)
+
+    bs.wipe(m, dest_name="ftp", assume_yes=True)
+
+    ftp = next(d for d in m.destinations if d.name == "ftp")
+    wipe_target.rclone_wipe.assert_called_once_with(ftp.rclone_remote, ftp.repo_path)
+    wipe_target.restic_init.assert_called_once_with(ftp.repository_url, m.restic.password)
+
+    # Ordering: the repo must be gone before we re-init it.
+    order = [c[0] for c in wipe_target.mock_calls if c[0] in ("rclone_wipe", "restic_init")]
+    assert order == ["rclone_wipe", "restic_init"]
+
+
+def test_wipe_no_reinit_skips_restic_init(monkeypatch, wipe_target, example_machine_path, example_secrets):
+    m = _real_machine(example_machine_path, example_secrets)
+    _patch_target(monkeypatch, wipe_target)
+
+    bs.wipe(m, dest_name="ftp", assume_yes=True, reinit=False)
+
+    wipe_target.rclone_wipe.assert_called_once()
+    wipe_target.restic_init.assert_not_called()
+
+
+def test_wipe_refuses_hetzner_sftp(monkeypatch, wipe_target, example_machine_path, example_secrets):
+    """rm -rf over SSH against a shared Storage Box is not something this tool does."""
+    m = _real_machine(example_machine_path, example_secrets)
+    _patch_target(monkeypatch, wipe_target)
+
+    with pytest.raises(click.ClickException, match="rclone destinations only"):
+        bs.wipe(m, dest_name="hetzner-hel", assume_yes=True)
+
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_wipe_rejects_unknown_destination(monkeypatch, wipe_target, example_machine_path, example_secrets):
+    m = _real_machine(example_machine_path, example_secrets)
+    _patch_target(monkeypatch, wipe_target)
+
+    with pytest.raises(click.ClickException, match="unknown destination"):
+        bs.wipe(m, dest_name="nope", assume_yes=True)
+
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_wipe_aborts_when_path_is_not_a_restic_repo(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    m = _real_machine(example_machine_path, example_secrets)
+    wipe_target.rclone_probe_repo.return_value = ("absent", "")
+    _patch_target(monkeypatch, wipe_target)
+
+    with pytest.raises(click.ClickException, match="holds no restic"):
+        bs.wipe(m, dest_name="ftp", assume_yes=True)
+
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_wipe_force_overrides_the_repo_guard(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    m = _real_machine(example_machine_path, example_secrets)
+    wipe_target.rclone_probe_repo.return_value = ("absent", "")
+    _patch_target(monkeypatch, wipe_target)
+
+    bs.wipe(m, dest_name="ftp", assume_yes=True, force=True)
+
+    wipe_target.rclone_wipe.assert_called_once()
+
+
+def test_wipe_refuses_repo_path_that_would_hit_the_remote_root(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    m = _real_machine(example_machine_path, example_secrets)
+    ftp = next(d for d in m.destinations if d.name == "ftp")
+    ftp.repo_path = "/"
+    _patch_target(monkeypatch, wipe_target)
+
+    with pytest.raises(click.ClickException, match="remote's root"):
+        bs.wipe(m, dest_name="ftp", assume_yes=True)
+
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_wipe_requires_typing_the_destination_name(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    m = _real_machine(example_machine_path, example_secrets)
+    _patch_target(monkeypatch, wipe_target)
+    monkeypatch.setattr(bs.click, "prompt", lambda *a, **k: "wrong")
+
+    with pytest.raises(click.ClickException, match="confirmation did not match"):
+        bs.wipe(m, dest_name="ftp")
+
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_wipe_proceeds_when_the_name_is_typed_correctly(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    m = _real_machine(example_machine_path, example_secrets)
+    _patch_target(monkeypatch, wipe_target)
+    monkeypatch.setattr(bs.click, "prompt", lambda *a, **k: "ftp")
+
+    bs.wipe(m, dest_name="ftp")
+
+    wipe_target.rclone_wipe.assert_called_once()
+
+
+def test_wipe_refuses_when_the_backend_is_unreachable(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    """A locked/down backend must NOT be reported as "no repository here".
+
+    Real case: Online.net locked the dedibackup space after the file quota was
+    exceeded, so `rclone lsf` failed at login. Reporting that as an empty path
+    sends the operator hunting for a missing repo instead of a blocked account.
+    """
+    m = _real_machine(example_machine_path, example_secrets)
+    wipe_target.rclone_probe_repo.return_value = (
+        "unreachable", "500 service unavailable")
+    _patch_target(monkeypatch, wipe_target)
+
+    with pytest.raises(click.ClickException, match="cannot reach") as exc:
+        bs.wipe(m, dest_name="ftp", assume_yes=True)
+
+    assert "500 service unavailable" in str(exc.value)
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_wipe_unreachable_is_not_forceable(
+    monkeypatch, wipe_target, example_machine_path, example_secrets
+):
+    """--force overrides "empty path", never "backend down"."""
+    m = _real_machine(example_machine_path, example_secrets)
+    wipe_target.rclone_probe_repo.return_value = ("unreachable", "500 service unavailable")
+    _patch_target(monkeypatch, wipe_target)
+
+    with pytest.raises(click.ClickException, match="--force will not help"):
+        bs.wipe(m, dest_name="ftp", assume_yes=True, force=True)
+
+    wipe_target.rclone_wipe.assert_not_called()
+
+
+def test_bootstrap_survives_one_failing_restic_init(
+    monkeypatch, fake_target, example_machine_path, example_secrets
+):
+    """One unreachable destination must not abort the whole run with a traceback.
+
+    Real case: the ftp repo probe failed, restic init then died, and bootstrap
+    exploded *after* every script had already been deployed.
+    """
+    m = _real_machine(example_machine_path, example_secrets)
+    fake_target.restic_repo_exists.return_value = False
+
+    def _init(repo_url, _pw):
+        if "online-ftp" in repo_url:
+            raise RuntimeError("exit status 1")
+
+    fake_target.restic_init.side_effect = _init
+    _patch_target(monkeypatch, fake_target)
+    _patch_hetzner_box(monkeypatch)
+
+    with pytest.raises(click.ClickException, match="restic init failed for: ftp"):
+        bs.bootstrap(m, dry_run=False, sudo_password=None)
+
+    # Every destination was still attempted — no early abort.
+    attempted = [c.args[0] for c in fake_target.restic_init.call_args_list]
+    assert len(attempted) == len(m.destinations)

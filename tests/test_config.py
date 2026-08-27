@@ -202,3 +202,82 @@ def test_quote_safe_rejects_single_quote(tmp_path, example_machine_path):
     p.write_text("silentbox-restic-pass: \"bad'value\"\nsilentds-hc: x\nsilentds-webdav-pass: x\nonline-ftp-hc: x\nonline-ftp-pass: x\nhetzner-hel-hc: x\nhetzner-fsn-hc: x\n")
     with pytest.raises(ConfigError, match="single quote"):
         load_machine(example_machine_path, load_secrets(p))
+
+
+# ---------- pack_size_mib / per-destination retention ----------
+
+def _one_dest_machine(tmp_path, restic_extra=None, **dest_extra):
+    """A minimal one-destination machine, with extra keys spliced into the destination."""
+    secrets = tmp_path / "s.yaml"
+    secrets.write_text(yaml.safe_dump({"pw": "PASS", "hc": "1111"}))
+    dest = {
+        "name": "ftp",
+        "kind": "rclone-ftp",
+        "healthcheck_ref": "hc",
+        "rclone_remote": "online-ftp",
+        "repo_path": "box",
+        "schedule": {"hour": 3, "prune_minute": 15},
+        "ftp": {"host": "h", "user": "u", "password_ref": "pw"},
+    }
+    dest.update(dest_extra)
+    restic = {"password_ref": "pw"}
+    restic.update(restic_extra or {})
+    cfg = tmp_path / "m.yaml"
+    cfg.write_text(yaml.safe_dump({
+        "machine": "m",
+        "target": {"host": "h"},
+        "restic": restic,
+        "sources": ["/home/x"],
+        "destinations": [dest],
+    }))
+    return load_machine(cfg, load_secrets(secrets))
+
+
+def test_pack_size_mib_defaults_to_none(tmp_path):
+    assert _one_dest_machine(tmp_path).destinations[0].pack_size_mib is None
+
+
+def test_pack_size_mib_parses(tmp_path):
+    m = _one_dest_machine(tmp_path, pack_size_mib=128)
+    assert m.destinations[0].pack_size_mib == 128
+
+
+@pytest.mark.parametrize("bad", [0, -1, 129, 1024])
+def test_pack_size_mib_out_of_range_rejected(tmp_path, bad):
+    """128 MiB is restic's hard MaxPackSize; anything outside 1..128 is a config error."""
+    with pytest.raises(ConfigError, match="pack_size_mib"):
+        _one_dest_machine(tmp_path, pack_size_mib=bad)
+
+
+def test_pack_size_mib_non_integer_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="must be an integer"):
+        _one_dest_machine(tmp_path, pack_size_mib="big")
+
+
+def test_destination_retention_defaults_to_none(tmp_path):
+    assert _one_dest_machine(tmp_path).destinations[0].retention is None
+
+
+def test_destination_retention_parses(tmp_path):
+    m = _one_dest_machine(tmp_path, retention="--keep-daily 7 --keep-weekly 4")
+    assert m.destinations[0].retention == "--keep-daily 7 --keep-weekly 4"
+
+
+@pytest.mark.parametrize("bad", [
+    "--keep-daily 7; id",
+    "--keep-daily $(id)",
+    "--keep-daily 7 && id",
+    "--keep-daily 7 | tee out",
+    "--keep-daily `id`",
+    "--keep-daily 7 > out",
+])
+def test_destination_retention_rejects_shell_metacharacters(tmp_path, bad):
+    """retention is interpolated UNQUOTED into the generated bash — keep it to plain words."""
+    with pytest.raises(ConfigError, match="not allowed"):
+        _one_dest_machine(tmp_path, retention=bad)
+
+
+def test_machine_global_retention_also_validated(tmp_path):
+    """The pre-existing machine-global field goes through the same guard."""
+    with pytest.raises(ConfigError, match="restic.retention"):
+        _one_dest_machine(tmp_path, restic_extra={"retention": "--keep-daily 30; id"})

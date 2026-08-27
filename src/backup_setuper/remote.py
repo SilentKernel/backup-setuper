@@ -6,11 +6,69 @@ flat sequence of steps and so tests can mock at a meaningful boundary.
 from __future__ import annotations
 
 import io
+import os
 import shlex
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
+import paramiko
 from fabric import Config, Connection
+
+
+# ---------- ssh agent ----------
+
+def ensure_agent_socket(host: str, config_path: Path | None = None) -> str | None:
+    """Point paramiko at the agent named by `IdentityAgent` in ~/.ssh/config.
+
+    paramiko honours only $SSH_AUTH_SOCK and silently ignores IdentityAgent, so
+    anyone whose keys live in an external agent (1Password, Secretive, gpg-agent)
+    hits "No authentication methods available" even though plain `ssh` works.
+    Fabric does not bridge this either.
+
+    Returns the socket path we set, or None if we left the environment alone
+    (SSH_AUTH_SOCK already set, no config, no IdentityAgent, or a dead socket).
+    """
+    if os.environ.get("SSH_AUTH_SOCK"):
+        return None
+    cfg_path = config_path or Path.home() / ".ssh" / "config"
+    try:
+        if not cfg_path.is_file():
+            return None
+        cfg = paramiko.SSHConfig()
+        with cfg_path.open() as fh:
+            cfg.parse(fh)
+        agent = cfg.lookup(host).get("identityagent")
+    except Exception:
+        # A malformed ~/.ssh/config must not take down the whole run; paramiko
+        # will just fall back to its usual key discovery and report auth failure.
+        return None
+    if not agent:
+        return None
+    sock = Path(agent.strip().strip('"').strip("'")).expanduser()
+    if not sock.exists():
+        return None
+    os.environ["SSH_AUTH_SOCK"] = str(sock)
+    return str(sock)
+
+
+def _auth_hint(host: str, exc: Exception) -> str:
+    """Turn a paramiko auth failure into something actionable."""
+    msg = f"SSH to {host} failed: {exc}"
+    if not os.environ.get("SSH_AUTH_SOCK"):
+        msg += (
+            "\n    No SSH agent is reachable ($SSH_AUTH_SOCK is unset and no usable "
+            "IdentityAgent was found in ~/.ssh/config)."
+            "\n    If your keys live in an external agent, point at its socket, e.g.:"
+            "\n      SSH_AUTH_SOCK=~/.1password/agent.sock backup-setuper …"
+        )
+    else:
+        msg += (
+            f"\n    Agent socket in use: {os.environ['SSH_AUTH_SOCK']}"
+            "\n    If your agent requires confirmation (1Password, Secretive), approve "
+            "the prompt — it times out silently otherwise."
+        )
+    return msg
 
 
 # ---------- target machine ----------
@@ -29,6 +87,8 @@ class TargetSSH:
         config = None
         if sudo:
             config = Config(overrides={"sudo": {"password": sudo_password}})
+        # Must happen before Connection(): paramiko reads SSH_AUTH_SOCK at connect time.
+        self.agent_socket = ensure_agent_socket(host)
         self.conn = Connection(
             host=host, user=user, port=port,
             connect_kwargs=connect_kwargs, config=config,
@@ -37,6 +97,12 @@ class TargetSSH:
         self.sudo = sudo
 
     def __enter__(self):
+        # Connect eagerly. Fabric opens lazily on first command, which means an auth
+        # failure surfaces as a traceback from deep inside an unrelated step.
+        try:
+            self.conn.open()
+        except paramiko.SSHException as e:
+            raise RuntimeError(_auth_hint(self.host, e)) from e
         return self
 
     def __exit__(self, *exc):
@@ -117,6 +183,40 @@ class TargetSSH:
             "rclone obscure -", in_stream=io.StringIO(cleartext + "\n"), hide=True,
         )
         return r.stdout.strip()
+
+    def rclone_probe_repo(self, remote: str, path: str) -> tuple[str, str]:
+        """Classify what is at remote:path — ('repo' | 'absent' | 'unreachable', detail).
+
+        Guard against wiping the wrong directory: a restic repo root always has a
+        `config` object next to data/, index/, keys/ and snapshots/.
+
+        'absent' and 'unreachable' must stay distinct. Collapsing them into a plain
+        False makes a locked or down backend look like an empty directory, so the
+        caller reports "no repository here" when the truth is "cannot reach the
+        backend at all" — and --force would then aim a purge at a dead endpoint.
+        """
+        r = self._run(
+            f"rclone lsf {shlex.quote(f'{remote}:{path}')}",
+            warn=True, hide=True,
+        )
+        if r.ok:
+            entries = {line.strip().rstrip("/") for line in r.stdout.splitlines() if line.strip()}
+            return ("repo" if "config" in entries else "absent", "")
+        detail = (getattr(r, "stderr", "") or "").strip().splitlines()
+        detail = detail[-1] if detail else f"rclone exited {r.exited}"
+        # rclone exits 3 for "directory not found" — the path is genuinely absent
+        # on a backend we could otherwise talk to.
+        if r.exited == 3 or "directory not found" in detail.lower():
+            return ("absent", detail)
+        return ("unreachable", detail)
+
+    def rclone_wipe(self, remote: str, path: str) -> None:
+        """`rclone purge remote:path` — removes the path and everything beneath it.
+
+        purge, not delete: delete leaves the directory tree behind, and rmdir only
+        removes empty directories.
+        """
+        self._run(f"rclone purge {shlex.quote(f'{remote}:{path}')}", hide=False)
 
     def restic_repo_exists(self, repo_url: str, password: str) -> bool:
         r = self._run(
@@ -232,9 +332,14 @@ class HetznerBox:
 
     def __init__(self, ref: HetznerBoxRef):
         self.ref = ref
+        ensure_agent_socket(ref.host)
         self.conn = Connection(host=ref.host, user=ref.user, port=ref.port)
 
     def __enter__(self):
+        try:
+            self.conn.open()
+        except paramiko.SSHException as e:
+            raise RuntimeError(_auth_hint(self.ref.host, e)) from e
         return self
 
     def __exit__(self, *exc):

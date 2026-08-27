@@ -131,16 +131,33 @@ def bootstrap(machine: Machine, dry_run: bool = False, sudo_password: str | None
             _ok("nothing stale")
 
         _step("Initializing restic repositories")
+        failed: list[str] = []
         for d in machine.destinations:
             if target.restic_repo_exists(d.repository_url, machine.restic.password):
                 _ok(f"{d.name}: already initialized")
-            else:
-                _ok(f"{d.name}: running restic init …")
+                continue
+            # A probe failure means "repo missing" OR "backend unreachable" — restic
+            # cannot tell us which. Try the init, but never let one bad destination
+            # abort the run: the scripts are already deployed and the operator still
+            # needs the cron block.
+            _ok(f"{d.name}: running restic init …")
+            try:
                 target.restic_init(d.repository_url, machine.restic.password)
+            except Exception as e:
+                _warn(f"{d.name}: restic init FAILED — {type(e).__name__}")
+                _warn("   the repo may simply be unreachable rather than missing; "
+                      "check the backend before re-running")
+                failed.append(d.name)
 
         _step("Done. Install the cron block below with `crontab -e`:")
         click.echo("")
         click.echo(bundle.cron_txt)
+
+        if failed:
+            raise click.ClickException(
+                f"scripts deployed, but restic init failed for: {', '.join(failed)}. "
+                f"Everything else succeeded — fix the backend and re-run bootstrap."
+            )
 
 
 def hetzner_keys(machine: Machine, sudo_password: str | None = None) -> None:
@@ -186,12 +203,7 @@ def check(
     locally without re-running bootstrap.
     """
     if dest_name is not None:
-        selected = [d for d in machine.destinations if d.name == dest_name]
-        if not selected:
-            valid = ", ".join(d.name for d in machine.destinations)
-            raise click.ClickException(
-                f"unknown destination {dest_name!r}; valid names: {valid}"
-            )
+        selected = [_select_destination(machine, dest_name)]
     else:
         selected = machine.destinations
 
@@ -227,6 +239,91 @@ def check(
 
     if failures:
         raise click.ClickException(f"{failures} check(s) failed")
+
+
+def _select_destination(machine: Machine, dest_name: str):
+    """Resolve a destination by name or raise with the list of valid names."""
+    for d in machine.destinations:
+        if d.name == dest_name:
+            return d
+    valid = ", ".join(d.name for d in machine.destinations)
+    raise click.ClickException(f"unknown destination {dest_name!r}; valid names: {valid}")
+
+
+def wipe(
+    machine: Machine,
+    dest_name: str,
+    assume_yes: bool = False,
+    reinit: bool = True,
+    force: bool = False,
+    sudo_password: str | None = None,
+) -> None:
+    """Destroy one destination's restic repository, then re-initialize it.
+
+    For rclone-backed destinations only. Hetzner Storage Boxes are refused on
+    purpose: wiping one means `rm -rf` over SSH against a shared box, which is a
+    worse failure mode than doing it by hand.
+
+    Intended for the case where a repo has to be rebuilt from scratch — e.g. to
+    apply a new pack size, which only affects newly written pack files.
+    """
+    d = _select_destination(machine, dest_name)
+
+    if d.kind not in ("rclone-webdav", "rclone-ftp"):
+        raise click.ClickException(
+            f"{d.name}: wipe supports rclone destinations only, not {d.kind!r}. "
+            f"Remove {d.sftp.repo_path!r} on {d.sftp.host} by hand if you really mean to."
+        )
+
+    # Never let a malformed repo_path take out the remote's root.
+    if not d.repo_path or d.repo_path.strip().strip("/") in ("", "."):
+        raise click.ClickException(
+            f"{d.name}: repo_path {d.repo_path!r} would wipe the remote's root — refusing"
+        )
+
+    _step(f"About to DESTROY {d.label}")
+    click.echo(f"    repository: {d.repository_url}")
+    click.echo(f"    rclone path: {d.rclone_remote}:{d.repo_path}")
+    _warn("this is irreversible — every snapshot on this destination is lost")
+
+    sudo_password = _resolve_sudo_password(machine, sudo_password)
+    with _open_target(machine, sudo_password) as target:
+        _step("Verifying the path holds a restic repository")
+        status, detail = target.rclone_probe_repo(d.rclone_remote, d.repo_path)
+        if status == "unreachable":
+            # Never forceable: a purge aimed at a backend we cannot talk to does
+            # nothing useful, and the backend error is the actual problem to fix.
+            raise click.ClickException(
+                f"cannot reach {d.rclone_remote}:{d.repo_path} — the backend rejected us.\n"
+                f"    rclone said: {detail}\n"
+                f"    Fix the backend first; --force will not help here."
+            )
+        if status == "repo":
+            _ok("restic repository found")
+        elif force:
+            _warn("no restic repository found — continuing anyway (--force)")
+        else:
+            raise click.ClickException(
+                f"{d.rclone_remote}:{d.repo_path} is reachable but holds no restic "
+                f"repository (no `config` object). Re-run with --force if you are certain."
+            )
+
+        if not assume_yes:
+            typed = click.prompt(f"    type the destination name ({d.name}) to confirm",
+                                 default="", show_default=False)
+            if typed.strip() != d.name:
+                raise click.ClickException("confirmation did not match — nothing was touched")
+
+        _step("Wiping the remote repository")
+        target.rclone_wipe(d.rclone_remote, d.repo_path)
+        _ok("wiped")
+
+        if reinit:
+            _step("Re-initializing the repository")
+            target.restic_init(d.repository_url, machine.restic.password)
+            _ok("initialized — the next backup is a FULL upload, run it manually in tmux")
+        else:
+            _warn("not re-initialized (--no-reinit); run `init-repos` before the next backup")
 
 
 def init_repos(machine: Machine, sudo_password: str | None = None) -> None:

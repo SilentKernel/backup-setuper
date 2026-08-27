@@ -33,7 +33,7 @@ def render_prune_script(machine: Machine, dest: Destination) -> str:
     return _env().get_template("prune-restic.sh.j2").render(
         destination=dest,
         restic_password=machine.restic.password,
-        retention=machine.restic.retention,
+        retention=dest.retention or machine.restic.retention,
     )
 
 

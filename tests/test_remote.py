@@ -4,9 +4,17 @@ The Fabric I/O is mocked elsewhere (test_bootstrap.py). Here we just verify
 the pure logic: pubkey parsing and authorized_keys filtering decisions, plus
 the sudo-routing on TargetSSH.
 """
+import os
 from unittest.mock import MagicMock, patch
 
-from backup_setuper.remote import HetznerBox, HetznerBoxRef, TargetSSH, _key_body
+from backup_setuper.remote import (
+    HetznerBox,
+    HetznerBoxRef,
+    TargetSSH,
+    _auth_hint,
+    _key_body,
+    ensure_agent_socket,
+)
 
 
 def test_key_body_parses_standard_lines():
@@ -186,3 +194,89 @@ def test_write_file_no_sudo_direct_put():
     run_cmds = [c.args[0] for c in t.conn.run.call_args_list]
     assert any("chmod 644 /root/foo" in c for c in run_cmds)
     assert not t.conn.sudo.called
+
+
+# ---------- IdentityAgent -> SSH_AUTH_SOCK ----------
+#
+# paramiko honours only $SSH_AUTH_SOCK and ignores IdentityAgent, so external
+# agents (1Password, Secretive, gpg-agent) fail with "No authentication methods
+# available" even though plain `ssh` works. ensure_agent_socket bridges that.
+
+def _ssh_config(tmp_path, body: str):
+    p = tmp_path / "config"
+    p.write_text(body)
+    return p
+
+
+def test_agent_socket_set_from_identity_agent(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    sock = tmp_path / "agent.sock"
+    sock.touch()
+    cfg = _ssh_config(tmp_path, f"Host silentbox\n\tIdentityAgent {sock}\n")
+
+    assert ensure_agent_socket("silentbox", cfg) == str(sock)
+    assert os.environ["SSH_AUTH_SOCK"] == str(sock)
+
+
+def test_agent_socket_expands_tilde(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sock = tmp_path / ".1password" / "agent.sock"
+    sock.parent.mkdir()
+    sock.touch()
+    cfg = _ssh_config(tmp_path, "Host *\n\tIdentityAgent ~/.1password/agent.sock\n")
+
+    assert ensure_agent_socket("anything", cfg) == str(sock)
+
+
+def test_agent_socket_respects_existing_env(tmp_path, monkeypatch):
+    """An explicitly-set SSH_AUTH_SOCK always wins — we never override the user."""
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
+    sock = tmp_path / "agent.sock"
+    sock.touch()
+    cfg = _ssh_config(tmp_path, f"Host *\n\tIdentityAgent {sock}\n")
+
+    assert ensure_agent_socket("h", cfg) is None
+    assert os.environ["SSH_AUTH_SOCK"] == "/run/user/1000/keyring/ssh"
+
+
+def test_agent_socket_ignores_missing_socket(tmp_path, monkeypatch):
+    """A stale IdentityAgent path must not set SSH_AUTH_SOCK to a dead socket."""
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    cfg = _ssh_config(tmp_path, f"Host *\n\tIdentityAgent {tmp_path / 'gone.sock'}\n")
+
+    assert ensure_agent_socket("h", cfg) is None
+    assert "SSH_AUTH_SOCK" not in os.environ
+
+
+def test_agent_socket_no_config_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    assert ensure_agent_socket("h", tmp_path / "nope") is None
+    assert "SSH_AUTH_SOCK" not in os.environ
+
+
+def test_agent_socket_without_identity_agent_directive(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    cfg = _ssh_config(tmp_path, "Host silentbox\n\tPort 2244\n")
+    assert ensure_agent_socket("silentbox", cfg) is None
+
+
+def test_agent_socket_survives_malformed_config(tmp_path, monkeypatch):
+    """A broken ~/.ssh/config must not abort the run."""
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    cfg = _ssh_config(tmp_path, "this is not\x00 valid ssh config {{{\n")
+    assert ensure_agent_socket("h", cfg) is None
+
+
+def test_auth_hint_mentions_the_agent_when_none_is_reachable(monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    hint = _auth_hint("silentbox", Exception("No authentication methods available"))
+    assert "SSH_AUTH_SOCK" in hint
+    assert "agent.sock" in hint
+
+
+def test_auth_hint_mentions_approval_when_an_agent_is_set(monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/home/u/.1password/agent.sock")
+    hint = _auth_hint("silentbox", Exception("Authentication timeout."))
+    assert "/home/u/.1password/agent.sock" in hint
+    assert "approve" in hint.lower()

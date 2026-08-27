@@ -7,6 +7,9 @@ from typing import Any
 import yaml
 
 DESTINATION_KINDS = {"rclone-webdav", "rclone-ftp", "hetzner-sftp"}
+# restic refuses anything larger: internal/repository/repository.go,
+# `const MaxPackSize = 128 * 1024 * 1024`.
+MAX_PACK_SIZE_MIB = 128
 MONITOR_KINDS = {"healthchecks", "kuma"}
 
 
@@ -103,6 +106,11 @@ class Destination:
     webdav: WebDAVConf | None = None
     ftp: FTPConf | None = None
     sftp: SFTPConf | None = None
+    # restic --pack-size in MiB. Only worth setting for backends with a file-count
+    # quota (e.g. Online.net dedibackup caps at 1000 files); None = restic's 16 MiB.
+    pack_size_mib: int | None = None
+    # Overrides Restic.retention for this destination only. None = machine-global.
+    retention: str | None = None
 
     @property
     def repository_url(self) -> str:
@@ -194,6 +202,7 @@ def load_machine(path: Path, secrets: dict[str, str]) -> Machine:
     destinations = [_parse_destination(d, secrets) for d in dests_raw]
     _validate_destinations(destinations)
     _validate_strings(restic.password, "restic.password", quote_safe=True)
+    _validate_retention(restic.retention, "restic.retention")
 
     return Machine(
         name=name,
@@ -225,6 +234,25 @@ def _parse_destination(d: dict[str, Any], secrets: dict[str, str]) -> Destinatio
         monitor=monitor,
         schedule=sched,
     )
+
+    if "pack_size_mib" in d:
+        try:
+            ps = int(d["pack_size_mib"])
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"destination {d['name']!r}: pack_size_mib must be an integer, "
+                f"got {d['pack_size_mib']!r}"
+            ) from None
+        if not 1 <= ps <= MAX_PACK_SIZE_MIB:
+            raise ConfigError(
+                f"destination {d['name']!r}: pack_size_mib must be between 1 and "
+                f"{MAX_PACK_SIZE_MIB} (restic's hard maximum), got {ps}"
+            )
+        dest.pack_size_mib = ps
+
+    if "retention" in d:
+        dest.retention = str(d["retention"])
+        _validate_retention(dest.retention, f"destinations[{d['name']}].retention")
 
     if kind == "rclone-webdav":
         w = d["webdav"]
@@ -312,3 +340,19 @@ def _validate_destinations(dests: list[Destination]) -> None:
 def _validate_strings(s: str, where: str, quote_safe: bool = False) -> None:
     if quote_safe and "'" in s:
         raise ConfigError(f"{where}: single quote not allowed (breaks shell single-quoting)")
+
+
+# The retention string is interpolated UNQUOTED into the generated bash
+# (`restic forget {{ retention }} --prune`) because it is a list of flags, not one
+# value — so it cannot be single-quoted the way passwords are. Reject anything the
+# shell would treat as more than plain words.
+_RETENTION_FORBIDDEN = set(";|&$`<>()\n\r\\\"'")
+
+
+def _validate_retention(s: str, where: str) -> None:
+    bad = sorted(set(s) & _RETENTION_FORBIDDEN)
+    if bad:
+        raise ConfigError(
+            f"{where}: character(s) {' '.join(repr(c) for c in bad)} not allowed "
+            f"(the value is interpolated unquoted into a shell script)"
+        )

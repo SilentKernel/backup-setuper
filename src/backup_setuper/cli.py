@@ -92,6 +92,33 @@ def check(machine_path: Path, secrets_path: Path, sudo_password: str | None,
              sudo_password=sudo_password)
 
 
+@main.command()
+@click.argument("machine_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@secrets_opt
+@sudo_password_opt
+@click.option("--destination", "-d", "dest_name", required=True,
+              help="Destination to wipe. Required — there is deliberately no 'wipe all'.")
+@click.option("--yes", "assume_yes", is_flag=True,
+              help="Skip the interactive confirmation (for scripted runs).")
+@click.option("--reinit/--no-reinit", default=True, show_default=True,
+              help="Run `restic init` after wiping.")
+@click.option("--force", is_flag=True,
+              help="Wipe even if the path does not look like a restic repository.")
+def wipe(machine_path: Path, secrets_path: Path, sudo_password: str | None,
+         dest_name: str, assume_yes: bool, reinit: bool, force: bool) -> None:
+    """Destroy one destination's restic repository and re-initialize it.
+
+    IRREVERSIBLE: every snapshot on that destination is lost. Use it to rebuild a
+    repo from scratch, e.g. after setting `pack_size_mib` — restic's pack size only
+    applies to newly written pack files, so existing ones must be rewritten.
+
+    rclone destinations only; Hetzner Storage Boxes are refused on purpose.
+    """
+    bs.wipe(_load(machine_path, secrets_path), dest_name=dest_name,
+            assume_yes=assume_yes, reinit=reinit, force=force,
+            sudo_password=sudo_password)
+
+
 @main.command("hetzner-keys")
 @click.argument("machine_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @secrets_opt

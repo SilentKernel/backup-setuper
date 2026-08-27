@@ -163,3 +163,72 @@ def test_render_all_writes_expected_files(tmp_path: Path, example_machine_path, 
     # Backup/prune scripts are executable.
     for n in expected - {"cron.txt"}:
         assert (out_dir / n).stat().st_mode & 0o100, f"{n} not executable"
+
+
+# ---------- pack size ----------
+
+def test_pack_size_exported_in_both_scripts_for_ftp(example_machine_path, example_secrets):
+    """restic requires RESTIC_PACK_SIZE on every repo-modifying command, so it must
+    appear in the backup script AND the prune script."""
+    m = _machine(example_machine_path, example_secrets)
+    ftp = next(d for d in m.destinations if d.name == "ftp")
+    assert "export RESTIC_PACK_SIZE=128" in render_backup_script(m, ftp)
+    assert "export RESTIC_PACK_SIZE=128" in render_prune_script(m, ftp)
+
+
+def test_pack_size_block_keeps_the_blank_line_separator(example_machine_path, example_secrets):
+    """The conditional block must not eat the blank line after RESTIC_REPOSITORY —
+    a `{% endif -%}` here silently reflows every generated script."""
+    m = _machine(example_machine_path, example_secrets)
+    for name in ("silentds", "ftp"):
+        d = next(x for x in m.destinations if x.name == name)
+        for out in (render_backup_script(m, d), render_prune_script(m, d)):
+            lines = out.splitlines()
+            i = next(i for i, l in enumerate(lines) if l.startswith("export RESTIC_REPOSITORY="))
+            tail = lines[i + 1:]
+            if d.pack_size_mib:
+                assert tail[0].startswith("# Taille des paquets"), name
+                assert tail[1].startswith("export RESTIC_PACK_SIZE="), name
+                assert tail[2] == "", f"{name}: blank line lost after the pack-size block"
+            else:
+                assert tail[0] == "", f"{name}: blank line lost after RESTIC_REPOSITORY"
+
+
+def test_pack_size_absent_when_not_configured(example_machine_path, example_secrets):
+    m = _machine(example_machine_path, example_secrets)
+    for name in ("silentds", "hetzner-hel", "hetzner-fsn"):
+        d = next(x for x in m.destinations if x.name == name)
+        assert "RESTIC_PACK_SIZE" not in render_backup_script(m, d), name
+        assert "RESTIC_PACK_SIZE" not in render_prune_script(m, d), name
+
+
+# ---------- per-destination retention ----------
+
+def test_ftp_prune_uses_destination_retention_override(example_machine_path, example_secrets):
+    m = _machine(example_machine_path, example_secrets)
+    ftp = next(d for d in m.destinations if d.name == "ftp")
+    out = render_prune_script(m, ftp)
+    assert "restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune" in out
+    assert "--keep-daily 30" not in out
+
+
+def test_other_destinations_keep_machine_global_retention(example_machine_path, example_secrets):
+    m = _machine(example_machine_path, example_secrets)
+    for name in ("silentds", "hetzner-hel", "hetzner-fsn"):
+        d = next(x for x in m.destinations if x.name == name)
+        assert "restic forget --keep-daily 30 --prune" in render_prune_script(m, d), name
+
+
+# ---------- generated bash stays valid ----------
+
+def test_all_rendered_scripts_are_valid_bash(tmp_path, example_machine_path, example_secrets):
+    """Guards the Jinja whitespace control around the new conditional blocks."""
+    import subprocess
+
+    m = _machine(example_machine_path, example_secrets)
+    bundle = render_all(m)
+    for name, content in {**bundle.backup_scripts, **bundle.prune_scripts}.items():
+        p = tmp_path / name
+        p.write_text(content)
+        r = subprocess.run(["bash", "-n", str(p)], capture_output=True, text=True)
+        assert r.returncode == 0, f"{name} is not valid bash:\n{r.stderr}"

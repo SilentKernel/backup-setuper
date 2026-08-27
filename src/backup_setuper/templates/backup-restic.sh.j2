@@ -6,7 +6,10 @@ HC_FAIL_URL='{{ destination.monitor.fail_url }}'
 
 export RESTIC_PASSWORD='{{ restic_password }}'
 export RESTIC_REPOSITORY='{{ destination.repository_url }}'
-
+{% if destination.pack_size_mib -%}
+# Taille des paquets en MiB — limite le nombre de fichiers sur le dépôt distant
+export RESTIC_PACK_SIZE={{ destination.pack_size_mib }}
+{% endif %}
 {% if destination.monitor.has_start -%}
 # Signaler le démarrage
 curl -fsS -m 10 --retry 5 "${HC_START_URL}" > /dev/null
