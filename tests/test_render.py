@@ -208,7 +208,7 @@ def test_ftp_prune_uses_destination_retention_override(example_machine_path, exa
     m = _machine(example_machine_path, example_secrets)
     ftp = next(d for d in m.destinations if d.name == "ftp")
     out = render_prune_script(m, ftp)
-    assert "restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune" in out
+    assert "restic forget --keep-within 14d --prune" in out
     assert "--keep-daily 30" not in out
 
 
