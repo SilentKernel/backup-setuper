@@ -232,3 +232,37 @@ def test_all_rendered_scripts_are_valid_bash(tmp_path, example_machine_path, exa
         p.write_text(content)
         r = subprocess.run(["bash", "-n", str(p)], capture_output=True, text=True)
         assert r.returncode == 0, f"{name} is not valid bash:\n{r.stderr}"
+
+
+def test_keep_within_7d_override_wins_over_global_keep_daily(tmp_path, example_secrets):
+    """Shape used by the production silentbox ftp destination: a short --keep-within
+    override on the file-quota-constrained repo, machine-global --keep-daily elsewhere."""
+    import yaml as _yaml
+
+    cfg = {
+        "machine": "x",
+        "target": {"host": "h"},
+        "restic": {"password_ref": "silentbox-restic-pass", "retention": "--keep-daily 30"},
+        "sources": ["/x"],
+        "destinations": [
+            {"name": "ftp", "kind": "rclone-ftp", "healthcheck_ref": "online-ftp-hc",
+             "rclone_remote": "online-ftp", "repo_path": "silentbox25",
+             "retention": "--keep-within 7d",
+             "schedule": {"hour": 3, "prune_minute": 15},
+             "ftp": {"host": "ftp.example.com", "user": "u", "password_ref": "online-ftp-pass"}},
+            {"name": "hetzner", "kind": "hetzner-sftp", "healthcheck_ref": "hetzner-hel-hc",
+             "schedule": {"hour": 2, "prune_minute": 30},
+             "sftp": {"user": "u", "host": "h", "repo_path": "/p"}},
+        ],
+    }
+    p = tmp_path / "m.yaml"
+    p.write_text(_yaml.safe_dump(cfg))
+    m = load_machine(p, load_secrets(example_secrets))
+
+    ftp = next(d for d in m.destinations if d.name == "ftp")
+    out = render_prune_script(m, ftp)
+    assert "restic forget --keep-within 7d --prune" in out
+    assert "--keep-daily 30" not in out
+
+    hetzner = next(d for d in m.destinations if d.name == "hetzner")
+    assert "restic forget --keep-daily 30 --prune" in render_prune_script(m, hetzner)
