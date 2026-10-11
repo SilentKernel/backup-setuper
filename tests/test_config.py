@@ -281,3 +281,21 @@ def test_machine_global_retention_also_validated(tmp_path):
     """The pre-existing machine-global field goes through the same guard."""
     with pytest.raises(ConfigError, match="restic.retention"):
         _one_dest_machine(tmp_path, restic_extra={"retention": "--keep-daily 30; id"})
+
+
+# ---------- schedule.prune_daily ----------
+
+def test_prune_daily_defaults_to_false(tmp_path):
+    assert _one_dest_machine(tmp_path).destinations[0].schedule.prune_daily is False
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_prune_daily_parses(tmp_path, value):
+    m = _one_dest_machine(tmp_path, schedule={"hour": 3, "prune_minute": 15, "prune_daily": value})
+    assert m.destinations[0].schedule.prune_daily is value
+
+
+@pytest.mark.parametrize("bad", ["yes please", "true", 3, 1, None])
+def test_prune_daily_rejects_non_bool(tmp_path, bad):
+    with pytest.raises(ConfigError, match="prune_daily"):
+        _one_dest_machine(tmp_path, schedule={"hour": 3, "prune_minute": 15, "prune_daily": bad})

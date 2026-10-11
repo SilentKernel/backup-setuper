@@ -215,8 +215,12 @@ class TargetSSH:
 
         purge, not delete: delete leaves the directory tree behind, and rmdir only
         removes empty directories.
+
+        --checkers 1: FTP has no server-side purge, so rclone lists and deletes
+        with one connection per checker (8 by default). Online.net's dedibackup
+        refuses the extra logins with "530 bad login" and the purge ends half done.
         """
-        self._run(f"rclone purge {shlex.quote(f'{remote}:{path}')}", hide=False)
+        self._run(f"rclone purge --checkers 1 {shlex.quote(f'{remote}:{path}')}", hide=False)
 
     def restic_repo_exists(self, repo_url: str, password: str) -> bool:
         r = self._run(

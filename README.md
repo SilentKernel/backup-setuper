@@ -60,13 +60,14 @@ size only applies to newly written pack files.
 
 Some backends cap the *number* of files, not just the bytes — Online.net's dedibackup
 space allows 1000. restic's default 16 MiB packs blow through that fast, so a destination
-can override two things:
+can override three things:
 
 ```yaml
   - name: ftp
     kind: rclone-ftp
     pack_size_mib: 128        # restic --pack-size, 1..128 (128 is restic's hard maximum)
-    retention: '--keep-daily 7 --keep-weekly 4 --keep-monthly 3'   # overrides restic.retention
+    retention: '--keep-within 3d'                                  # overrides restic.retention
+    schedule: { hour: 3, prune_minute: 15, prune_daily: true }     # prune every day, not weekly
 ```
 
 - `pack_size_mib` is exported as `RESTIC_PACK_SIZE` in both the backup and prune scripts,
@@ -74,6 +75,11 @@ can override two things:
 - `retention` overrides the machine-global `restic.retention` for this destination only.
   It is interpolated unquoted into the generated bash, so shell metacharacters are
   rejected at config-load time.
+- `schedule.prune_daily: true` runs forget + prune every day at 22:`prune_minute` instead
+  of Sundays only. Retention is only enforced when prune runs: with the default weekly
+  prune, `--keep-within 3d` still lets up to 3 + 7 days of snapshots pile up. Daily prune
+  also keeps each repack small — restic uploads repacked packs *before* deleting the old
+  ones, so a repo that has reached its quota can no longer prune itself.
 
 Note the arithmetic before relying on this: 1000 files × 128 MiB ≈ 120 GB is the hard
 ceiling for such a destination. Pack size gets a repo under a file cap; retention is what

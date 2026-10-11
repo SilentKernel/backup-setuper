@@ -62,6 +62,10 @@ def test_cron_block(example_machine_path, example_secrets):
     assert "0 4  * * * /root/backup-scripts/backup-restic-silentds.sh" in out
     assert "0  22 * * 0 /root/backup-scripts/prune-restic-silentds.sh" in out
     assert "45 22 * * 0 /root/backup-scripts/prune-restic-hetzner-fsn.sh" in out
+    assert "30 22 * * 0 /root/backup-scripts/prune-restic-hetzner-hel.sh" in out
+    # ftp has schedule.prune_daily: every day, not Sundays only.
+    assert "15 22 * * * /root/backup-scripts/prune-restic-ftp.sh" in out
+    assert "22 * * 0 /root/backup-scripts/prune-restic-ftp.sh" not in out
 
 
 def test_rclone_conf(example_machine_path, example_secrets):
@@ -208,7 +212,7 @@ def test_ftp_prune_uses_destination_retention_override(example_machine_path, exa
     m = _machine(example_machine_path, example_secrets)
     ftp = next(d for d in m.destinations if d.name == "ftp")
     out = render_prune_script(m, ftp)
-    assert "restic forget --keep-within 14d --prune" in out
+    assert "restic forget --keep-within 3d --prune" in out
     assert "--keep-daily 30" not in out
 
 
@@ -234,9 +238,10 @@ def test_all_rendered_scripts_are_valid_bash(tmp_path, example_machine_path, exa
         assert r.returncode == 0, f"{name} is not valid bash:\n{r.stderr}"
 
 
-def test_keep_within_7d_override_wins_over_global_keep_daily(tmp_path, example_secrets):
-    """Shape used by the production silentbox ftp destination: a short --keep-within
-    override on the file-quota-constrained repo, machine-global --keep-daily elsewhere."""
+def test_production_ftp_shape_3d_retention_big_packs_daily_prune(tmp_path, example_secrets):
+    """Shape used by the production silentbox ftp destination: 128 MiB packs, a short
+    --keep-within override and a daily prune on the file-quota-constrained repo;
+    machine-global --keep-daily, default packs and weekly prune elsewhere."""
     import yaml as _yaml
 
     cfg = {
@@ -247,8 +252,9 @@ def test_keep_within_7d_override_wins_over_global_keep_daily(tmp_path, example_s
         "destinations": [
             {"name": "ftp", "kind": "rclone-ftp", "healthcheck_ref": "online-ftp-hc",
              "rclone_remote": "online-ftp", "repo_path": "silentbox25",
-             "retention": "--keep-within 7d",
-             "schedule": {"hour": 3, "prune_minute": 15},
+             "pack_size_mib": 128,
+             "retention": "--keep-within 3d",
+             "schedule": {"hour": 3, "prune_minute": 15, "prune_daily": True},
              "ftp": {"host": "ftp.example.com", "user": "u", "password_ref": "online-ftp-pass"}},
             {"name": "hetzner", "kind": "hetzner-sftp", "healthcheck_ref": "hetzner-hel-hc",
              "schedule": {"hour": 2, "prune_minute": 30},
@@ -261,8 +267,16 @@ def test_keep_within_7d_override_wins_over_global_keep_daily(tmp_path, example_s
 
     ftp = next(d for d in m.destinations if d.name == "ftp")
     out = render_prune_script(m, ftp)
-    assert "restic forget --keep-within 7d --prune" in out
+    assert "restic forget --keep-within 3d --prune" in out
     assert "--keep-daily 30" not in out
+    assert "export RESTIC_PACK_SIZE=128" in out
+    assert "export RESTIC_PACK_SIZE=128" in render_backup_script(m, ftp)
 
     hetzner = next(d for d in m.destinations if d.name == "hetzner")
     assert "restic forget --keep-daily 30 --prune" in render_prune_script(m, hetzner)
+    assert "RESTIC_PACK_SIZE" not in render_prune_script(m, hetzner)
+    assert "RESTIC_PACK_SIZE" not in render_backup_script(m, hetzner)
+
+    cron = render_cron(m)
+    assert "15 22 * * * /root/backup-scripts/prune-restic-ftp.sh" in cron
+    assert "30 22 * * 0 /root/backup-scripts/prune-restic-hetzner.sh" in cron

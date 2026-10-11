@@ -70,6 +70,8 @@ class Restic:
 class Schedule:
     hour: int
     prune_minute: int
+    # False = forget + prune weekly (Sunday 22:xx). True = every day at 22:xx.
+    prune_daily: bool = False
 
 
 @dataclass
@@ -225,6 +227,14 @@ def _parse_destination(d: dict[str, Any], secrets: dict[str, str]) -> Destinatio
         raise ConfigError(f"destination {d['name']}: schedule.hour out of range")
     if not 0 <= sched.prune_minute <= 59:
         raise ConfigError(f"destination {d['name']}: schedule.prune_minute out of range")
+    if "prune_daily" in d["schedule"]:
+        # Strict bool: YAML turns `yes`/`on` into True already, anything else is a typo.
+        if not isinstance(d["schedule"]["prune_daily"], bool):
+            raise ConfigError(
+                f"destination {d['name']}: schedule.prune_daily must be true or false, "
+                f"got {d['schedule']['prune_daily']!r}"
+            )
+        sched.prune_daily = d["schedule"]["prune_daily"]
 
     monitor = _parse_monitor(d, secrets)
 

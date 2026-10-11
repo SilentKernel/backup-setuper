@@ -186,6 +186,15 @@ def test_restic_check_routes_through_sudo():
     assert "restic -r" in cmd and "check" in cmd
 
 
+def test_rclone_wipe_purges_on_a_single_connection():
+    """FTP servers with a per-account connection cap answer "530 bad login" to the
+    extra logins rclone's default 8 checkers open, leaving the purge half done."""
+    t = _make_target(sudo=False)
+    t.rclone_wipe("online-ftp", "silentbox25")
+    cmd = t.conn.run.call_args[0][0]
+    assert cmd == "rclone purge --checkers 1 online-ftp:silentbox25"
+
+
 def test_write_file_no_sudo_direct_put():
     t = _make_target(sudo=False)
     t.write_file("/root/foo", "x")
