@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
+from invoke.exceptions import UnexpectedExit
 
 from backup_setuper import bootstrap as bs
 from backup_setuper.config import ConfigError, load_machine, load_secrets
@@ -33,7 +35,42 @@ sudo_password_opt = click.option(
 )
 
 
-@click.group()
+def _one_line(e: BaseException) -> str:
+    """Last meaningful line of an exception message (invoke's are multi-page)."""
+    lines = [l.strip() for l in str(e).strip().splitlines() if l.strip()]
+    return lines[-1] if lines else type(e).__name__
+
+
+class _Group(click.Group):
+    """Never show a Python traceback: every failure becomes one `Error: …` line.
+
+    Set BACKUP_SETUPER_DEBUG=1 to get the full traceback back when debugging the tool.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except (click.ClickException, click.exceptions.Exit, click.Abort):
+            raise
+        except KeyboardInterrupt:
+            raise click.ClickException("interrupted") from None
+        except Exception as e:
+            if os.environ.get("BACKUP_SETUPER_DEBUG"):
+                raise
+            if isinstance(e, UnexpectedExit):
+                # The remote command's own output has already been printed above.
+                err = (e.result.stderr or "").strip().splitlines()
+                msg = f"remote command failed (exit {e.result.exited})"
+                if err:
+                    msg += f": {err[-1].strip()}"
+            elif isinstance(e, RuntimeError):
+                msg = str(e)
+            else:
+                msg = f"{_one_line(e)} ({type(e).__name__})"
+            raise click.ClickException(msg) from None
+
+
+@click.group(cls=_Group)
 @click.version_option()
 def main() -> None:
     """Bootstrap restic backups on a new server from your Mac."""

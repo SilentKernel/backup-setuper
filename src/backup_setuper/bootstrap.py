@@ -226,7 +226,13 @@ def check(
                 _warn("restic password OUT OF SYNC with local config (re-run bootstrap)")
                 failures += 1
             else:
-                _ok("restic password in sync")
+                _ok("deployed script password matches local config")
+
+            if not target.restic_repo_exists(d.repository_url, machine.restic.password):
+                _warn("no readable repository at this destination — if it is new or was "
+                      "just wiped, create it with: backup-setuper init-repos <machine.yaml>")
+                failures += 1
+                continue
 
             if target.restic_check(
                 d.repository_url, machine.restic.password,
@@ -315,8 +321,10 @@ def wipe(
                 raise click.ClickException("confirmation did not match — nothing was touched")
 
         _step("Wiping the remote repository")
-        target.rclone_wipe(d.rclone_remote, d.repo_path)
-        _ok("wiped")
+        if target.rclone_wipe(d.rclone_remote, d.repo_path):
+            _ok("wiped")
+        else:
+            _ok("already gone — nothing to delete")
 
         if reinit:
             _step("Re-initializing the repository")

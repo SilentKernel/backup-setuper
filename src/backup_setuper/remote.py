@@ -14,6 +14,7 @@ from pathlib import Path
 
 import paramiko
 from fabric import Config, Connection
+from invoke.exceptions import AuthFailure
 
 
 # ---------- ssh agent ----------
@@ -84,9 +85,20 @@ class TargetSSH:
         sudo_password: str | None = None,
     ):
         connect_kwargs = {"key_filename": ssh_key} if ssh_key else None
-        config = None
+        # in_stream=False: never forward the local keyboard to remote commands.
+        # Nothing we run is interactive (the sudo password is sent by Fabric's
+        # auto-responder, not via stdin), and invoke 2.2.1's stdin reader crashes
+        # under Python 3.14 ("SystemError: buffer overflow" in bytes_to_read) as
+        # soon as a key is pressed during a long command.
+        overrides: dict = {"run": {"in_stream": False}}
         if sudo:
-            config = Config(overrides={"sudo": {"password": sudo_password}})
+            # The prompt is echoed on commands run with hide=False; make it obvious
+            # that nobody needs to type anything.
+            overrides["sudo"] = {
+                "password": sudo_password,
+                "prompt": "[sudo: password sent automatically] ",
+            }
+        config = Config(overrides=overrides)
         # Must happen before Connection(): paramiko reads SSH_AUTH_SOCK at connect time.
         self.agent_socket = ensure_agent_socket(host)
         self.conn = Connection(
@@ -103,6 +115,17 @@ class TargetSSH:
             self.conn.open()
         except paramiko.SSHException as e:
             raise RuntimeError(_auth_hint(self.host, e)) from e
+        if self.sudo:
+            # Validate the sudo password up front: a typo otherwise surfaces as an
+            # AuthFailure traceback from whichever step happens to run sudo first.
+            try:
+                self.conn.sudo("true", hide=True)
+            except AuthFailure:
+                self.conn.close()
+                raise RuntimeError(
+                    f"sudo password rejected on {self.host} — re-run and retype it "
+                    f"(or fix --sudo-password / $BACKUP_SETUPER_SUDO_PASSWORD)"
+                ) from None
         return self
 
     def __exit__(self, *exc):
@@ -210,8 +233,12 @@ class TargetSSH:
             return ("absent", detail)
         return ("unreachable", detail)
 
-    def rclone_wipe(self, remote: str, path: str) -> None:
+    def rclone_wipe(self, remote: str, path: str) -> bool:
         """`rclone purge remote:path` — removes the path and everything beneath it.
+
+        Returns True if something was deleted, False if the path was already gone
+        (rclone exits 3 "directory not found"): the goal state is reached either way,
+        e.g. after an earlier purge that was interrupted near the end.
 
         purge, not delete: delete leaves the directory tree behind, and rmdir only
         removes empty directories.
@@ -220,7 +247,22 @@ class TargetSSH:
         with one connection per checker (8 by default). Online.net's dedibackup
         refuses the extra logins with "530 bad login" and the purge ends half done.
         """
-        self._run(f"rclone purge --checkers 1 {shlex.quote(f'{remote}:{path}')}", hide=False)
+        target = shlex.quote(f"{remote}:{path}")
+        # Probe first rather than parse purge's output: on a missing path purge
+        # retries 3 times and spams ERROR lines before exiting 3.
+        probe = self._run(f"rclone lsf --max-depth 1 {target}", warn=True, hide=True)
+        if not probe.ok:
+            err = (getattr(probe, "stderr", "") or "").lower()
+            if probe.exited == 3 or "directory not found" in err:
+                return False
+            raise RuntimeError(f"cannot list {remote}:{path}: {err.strip() or f'rclone exited {probe.exited}'}")
+        # A one-line progress report every 30 s so a slow FTP purge doesn't look hung.
+        self._run(
+            "rclone purge --checkers 1 --stats 30s --stats-one-line --stats-log-level NOTICE "
+            f"{target}",
+            hide=False,
+        )
+        return True
 
     def restic_repo_exists(self, repo_url: str, password: str) -> bool:
         r = self._run(

@@ -1,3 +1,4 @@
+import pytest
 """Unit tests for the small parsing/decision helpers in remote.py.
 
 The Fabric I/O is mocked elsewhere (test_bootstrap.py). Here we just verify
@@ -190,9 +191,19 @@ def test_rclone_wipe_purges_on_a_single_connection():
     """FTP servers with a per-account connection cap answer "530 bad login" to the
     extra logins rclone's default 8 checkers open, leaving the purge half done."""
     t = _make_target(sudo=False)
-    t.rclone_wipe("online-ftp", "silentbox25")
+    assert t.rclone_wipe("online-ftp", "silentbox25") is True
     cmd = t.conn.run.call_args[0][0]
-    assert cmd == "rclone purge --checkers 1 online-ftp:silentbox25"
+    assert cmd.startswith("rclone purge --checkers 1 ")
+    assert cmd.endswith(" online-ftp:silentbox25")
+    assert "--stats 30s" in cmd
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+def test_target_never_forwards_local_stdin(sudo):
+    """invoke 2.2.1's stdin reader crashes on Python 3.14 when a key is pressed
+    mid-command; nothing we run needs the local keyboard."""
+    t = TargetSSH(host="x", user="ludo", sudo=sudo, sudo_password="p" if sudo else None)
+    assert t.conn.config.run.in_stream is False
 
 
 def test_write_file_no_sudo_direct_put():
@@ -289,3 +300,23 @@ def test_auth_hint_mentions_approval_when_an_agent_is_set(monkeypatch):
     hint = _auth_hint("silentbox", Exception("Authentication timeout."))
     assert "/home/u/.1password/agent.sock" in hint
     assert "approve" in hint.lower()
+
+
+def test_enter_rejects_wrong_sudo_password_cleanly():
+    from invoke.exceptions import AuthFailure
+    t = _make_target(sudo=True, sudo_password="typo")
+    t.conn.sudo.side_effect = AuthFailure(result=None, prompt="[sudo] ")
+    with pytest.raises(RuntimeError, match="sudo password rejected"):
+        t.__enter__()
+    assert t.conn.close.called
+
+
+def test_rclone_wipe_treats_missing_path_as_done():
+    """An interrupted purge can finish server-side; re-running must not fail."""
+    t = _make_target(sudo=False)
+    t.conn.run.return_value.ok = False
+    t.conn.run.return_value.exited = 3
+    t.conn.run.return_value.stderr = "Failed to list: directory not found"
+    assert t.rclone_wipe("online-ftp", "silentbox25") is False
+    cmds = [c[0][0] for c in t.conn.run.call_args_list]
+    assert not any("purge" in c for c in cmds)
