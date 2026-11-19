@@ -24,6 +24,8 @@ pytestmark = pytest.mark.skipif(
 
 ADDOK_NEW = "/home/ludo/address-autocomplete-ptifez0qbo.developpeur-freelance.io/addok-data"
 ADDOK_OLD = "internal-use-api-w53.lfmaps.fr"
+GITLAB_DATA = "/home/ludo/git.developpeur-freelance.io/data"
+GITLAB_REGISTRY = f"{GITLAB_DATA}/gitlab-rails/shared/registry"
 
 
 def _load(path: Path):
@@ -69,6 +71,35 @@ def test_addok_exclude_follows_the_new_domain(name):
     for script in render_all(m).backup_scripts.values():
         assert f"--exclude='{ADDOK_NEW}'" in script
         assert ADDOK_OLD not in script
+
+
+@pytest.mark.parametrize(
+    "exclude",
+    [
+        # The registry's Docker images are rebuilt by CI: not worth 66 GB per destination.
+        GITLAB_REGISTRY,
+        # Embedded Prometheus metrics: disposable.
+        f"{GITLAB_DATA}/prometheus",
+        # Old data dirs left by pg-upgrade (data.9.6 … data.16). The live one, `data`, has
+        # no dot suffix, so the pattern does not match it.
+        f"{GITLAB_DATA}/postgresql/data.*",
+    ],
+    ids=["registry", "prometheus", "old-postgresql"],
+)
+def test_home_dockerland_pc_gitlab_excludes(exclude):
+    m = _real("home-dockerland-pc")
+    assert exclude in m.excludes
+    scripts = render_all(m).backup_scripts
+    assert scripts
+    for script in scripts.values():
+        assert f"--exclude='{exclude}'" in script
+
+
+def test_home_dockerland_pc_keeps_live_gitlab_data():
+    # The live database and GitLab's own backup tars must stay in the backup.
+    m = _real("home-dockerland-pc")
+    for kept in (f"{GITLAB_DATA}/postgresql/data", f"{GITLAB_DATA}/postgresql", f"{GITLAB_DATA}/backups", GITLAB_DATA):
+        assert kept not in m.excludes
 
 
 def test_silent2box_destinations():
